@@ -11,6 +11,7 @@ go install github.com/lc/gau/v2/cmd/gau@latest
 go install github.com/tomnomnom/gf@latest
 go install github.com/s0md3v/uro@latest
 
+
 # Install Python packages
 pip3 install requests beautifulsoup4
 
