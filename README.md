@@ -2,7 +2,7 @@
 This Python based tool will perform the following features: Nmap Scan, Ping Sweep, Subdomain Enumeration, and Full Recon (subdomain and port scans) This sets the stage for the show
 Installation Requirements:
 
-bash
+
 # Install required tools (Kali Linux)
 sudo apt update
 sudo apt install amass subfinder
@@ -16,7 +16,7 @@ pip3 install requests
 
 Usage Examples:
 
-bash
+
 # Basic subdomain enumeration
 python3 SantanaScanner.py
 # Choose option 5, enter domain
