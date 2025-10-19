@@ -6,6 +6,18 @@ Installation Requirements:
 # Install required tools (Kali Linux)
 sudo apt update
 sudo apt install amass subfinder
+# Install required tools
+go install github.com/lc/gau/v2/cmd/gau@latest
+go install github.com/tomnomnom/gf@latest
+go install github.com/s0md3v/uro@latest
+
+# Install Python packages
+pip3 install requests beautifulsoup4
+
+# Setup gf patterns
+git clone https://github.com/tomnomnom/gf
+mkdir -p ~/.gf
+cp -r gf/examples/* ~/.gf/
 
 # Install Python dependencies
 pip3 install requests
