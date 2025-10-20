@@ -40,3 +40,6 @@ python3 SantanaScanner.py
 
 # Command line usage for specific domains
 echo "example.com" | python3 SantanaScanner.py
+
+<br>
+Coming Soon: Option to specify a specific endpoint to run the XSS scanner on.
