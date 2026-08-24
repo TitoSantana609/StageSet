@@ -5,6 +5,7 @@ Subdomain enumeration pulls from crt.sh, crt.name, Amass, and Subfinder.
 
 Installation Requirements:
 
+# crt.sh and crt.name are queried over HTTP directly, no installation needed
 
 # Install required tools (Kali Linux)
 sudo apt update <br>
