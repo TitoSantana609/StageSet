@@ -745,6 +745,29 @@ class SantanaScanner:
             print(f"  [-] Error querying crt.sh: {e}")
             return subdomains
 
+    def query_crtname(self, domain):
+        """Query crt.name for subdomains"""
+        print(f"Querying crt.name for {domain}...")
+        subdomains = set()
+
+        try:
+            url = f"https://crt.name/v1/search?apex={urllib.parse.quote(domain)}"
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+
+            response = requests.get(url, headers=headers, timeout=30)
+            if response.status_code == 200:
+                for line in response.text.splitlines():
+                    subdomain = line.strip().lower()
+                    if subdomain and domain in subdomain:
+                        subdomains.add(subdomain)
+
+            print(f"  [+] crt.name found {len(subdomains)} subdomains")
+            return subdomains
+
+        except Exception as e:
+            print(f"  [-] Error querying crt.name: {e}")
+            return subdomains
+
     def run_amass(self, domain, intensity=1):
         """Run Amass for subdomain enumeration"""
         print(f"Running Amass on {domain}...")
@@ -826,7 +849,7 @@ class SantanaScanner:
     def enumerate_subdomains(self, domain, methods=None, intensity=1):
         """Comprehensive subdomain enumeration"""
         if methods is None:
-            methods = ['crtsh', 'amass', 'subfinder']
+            methods = ['crtsh', 'crtname', 'amass', 'subfinder']
         
         if not self.validate_domain(domain):
             print(f"Error: Invalid domain: {domain}")
@@ -840,7 +863,11 @@ class SantanaScanner:
         if 'crtsh' in methods:
             crtsh_subs = self.query_crtsh(domain)
             all_subdomains.update(crtsh_subs)
-        
+
+        if 'crtname' in methods:
+            crtname_subs = self.query_crtname(domain)
+            all_subdomains.update(crtname_subs)
+
         if 'amass' in methods:
             amass_subs = self.run_amass(domain, intensity)
             all_subdomains.update(amass_subs)
@@ -954,21 +981,23 @@ def main():
         elif choice == '5':
             domain = input("Enter domain to enumerate (e.g., example.com): ").strip()
             print("\nEnumeration methods:")
-            print("1. All methods (crt.sh + Amass + Subfinder)")
+            print("1. All methods (crt.sh + crt.name + Amass + Subfinder)")
             print("2. crt.sh only (fast)")
-            print("3. Amass only (comprehensive)")
-            print("4. Subfinder only (fast)")
-            
-            method_choice = input("Select method (1-4, default 1): ").strip() or "1"
-            
+            print("3. crt.name only (fast)")
+            print("4. Amass only (comprehensive)")
+            print("5. Subfinder only (fast)")
+
+            method_choice = input("Select method (1-5, default 1): ").strip() or "1"
+
             methods_map = {
-                "1": ['crtsh', 'amass', 'subfinder'],
+                "1": ['crtsh', 'crtname', 'amass', 'subfinder'],
                 "2": ['crtsh'],
-                "3": ['amass'],
-                "4": ['subfinder']
+                "3": ['crtname'],
+                "4": ['amass'],
+                "5": ['subfinder']
             }
-            
-            methods = methods_map.get(method_choice, ['crtsh', 'amass', 'subfinder'])
+
+            methods = methods_map.get(method_choice, ['crtsh', 'crtname', 'amass', 'subfinder'])
             intensity = int(input("Scan intensity (1-3, default 1): ") or 1)
             
             scanner.enumerate_subdomains(domain, methods, intensity)
