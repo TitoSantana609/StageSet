@@ -1,7 +1,7 @@
 # StageSet.py
 This Python based tool will perform the following features: Nmap Scan, Ping Sweep, Subdomain Enumeration, and Full Recon (subdomain and port scans) This sets the stage for the show
 
-Subdomain enumeration pulls from crt.sh, crt.name, Amass, and Subfinder.
+Subdomain enumeration pulls from crt.sh, crt.name, Amass, and Subfinder. Live/dead status for discovered subdomains is checked with dnsx.
 
 Installation Requirements:
 
@@ -9,7 +9,7 @@ Installation Requirements:
 
 # Install required tools (Kali Linux)
 sudo apt update <br>
-sudo apt install amass subfinder <br>
+sudo apt install amass subfinder dnsx <br>
 # Install required tools
 go install github.com/lc/gau/v2/cmd/gau@latest <br>
 go install github.com/tomnomnom/gf@latest <br>
@@ -30,6 +30,7 @@ pip3 install requests
 # Or on other systems
 # Download and install Amass: https://github.com/OWASP/Amass
 # Download and install Subfinder: https://github.com/projectdiscovery/subfinder
+# Download and install dnsx: https://github.com/projectdiscovery/dnsx
 
 Usage Examples:
 

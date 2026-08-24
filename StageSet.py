@@ -27,6 +27,7 @@ class SantanaScanner:
         self.open_ports = []
         self.scan_results = {}
         self.subdomains = set()
+        self.live_subdomains = set()
         self.xss_findings = []
         self.lock = threading.Lock()
         
@@ -241,6 +242,9 @@ class SantanaScanner:
                 return result.returncode == 0
             elif tool_name == "uro":
                 result = subprocess.run(["uro", "-h"], capture_output=True, text=True)
+                return result.returncode == 0
+            elif tool_name == "dnsx":
+                result = subprocess.run(["dnsx", "-version"], capture_output=True, text=True)
                 return result.returncode == 0
         except FileNotFoundError:
             return False
@@ -899,6 +903,86 @@ class SantanaScanner:
         self.subdomains = set(sorted_subdomains)
         return self.subdomains
 
+    def run_dnsx(self, subdomains, timeout=300):
+        """Run dnsx to resolve subdomains and determine which are live"""
+        live_subdomains = set()
+
+        if not self.check_tool_installed("dnsx"):
+            print("  [-] dnsx not installed. Skipping...")
+            return live_subdomains
+
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as tmp:
+                tmp.write('\n'.join(subdomains))
+                tmp_path = tmp.name
+
+            command = ["dnsx", "-l", tmp_path, "-silent"]
+            result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+
+            for line in result.stdout.splitlines():
+                host = line.strip().lower()
+                if host:
+                    live_subdomains.add(host)
+
+            return live_subdomains
+
+        except subprocess.TimeoutExpired:
+            print("  [-] dnsx scan timed out")
+            return live_subdomains
+        except Exception as e:
+            print(f"  [-] Error running dnsx: {e}")
+            return live_subdomains
+        finally:
+            if tmp_path:
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+
+    def check_live_subdomains(self, subdomains):
+        """Check which subdomains are alive using dnsx and display the results"""
+        subdomains = set(subdomains)
+        print(f"\nChecking {len(subdomains)} subdomains for liveness with dnsx...")
+        print("=" * 50)
+
+        start_time = time.time()
+        live = self.run_dnsx(subdomains)
+        end_time = time.time()
+        dead = subdomains - live
+
+        print("\n" + "=" * 50)
+        print("LIVE SUBDOMAINS")
+        print("=" * 50)
+        if live:
+            for i, subdomain in enumerate(sorted(live), 1):
+                print(f"{i:3}. [+] {subdomain}")
+        else:
+            print("None found.")
+
+        print("\n" + "=" * 50)
+        print("DEAD / UNRESOLVED SUBDOMAINS")
+        print("=" * 50)
+        if dead:
+            for i, subdomain in enumerate(sorted(dead), 1):
+                print(f"{i:3}. [-] {subdomain}")
+        else:
+            print("None.")
+
+        print(f"\n{len(live)}/{len(subdomains)} subdomains are live ({end_time - start_time:.2f}s)")
+
+        filename = f"live_subdomains_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        try:
+            with open(filename, 'w') as f:
+                for subdomain in sorted(live):
+                    f.write(subdomain + '\n')
+            print(f"Live subdomains saved to: {filename}")
+        except Exception as e:
+            print(f"Error saving results: {e}")
+
+        self.live_subdomains = live
+        return live, dead
+
     def comprehensive_scan(self, target):
         """Perform a comprehensive scan with common ports"""
         common_ports = [21, 22, 23, 25, 53, 80, 110, 135, 139, 143, 443, 445, 
@@ -937,12 +1021,13 @@ def main():
         print("3. Comprehensive Scan")
         print("4. Ping Sweep")
         print("5. Subdomain Enumeration")
-        print("6. XSS Scan (Single URL)")
-        print("7. Advanced XSS Scan (Subdomains + GAU + gf + URO)")
-        print("8. Full Reconnaissance (Complete Workflow)")
-        print("9. Exit")
-        
-        choice = input("\nSelect option (1-9): ").strip()
+        print("6. Check Live Subdomains (dnsx)")
+        print("7. XSS Scan (Single URL)")
+        print("8. Advanced XSS Scan (Subdomains + GAU + gf + URO)")
+        print("9. Full Reconnaissance (Complete Workflow)")
+        print("10. Exit")
+
+        choice = input("\nSelect option (1-10): ").strip()
         
         if choice == '1':
             target = input("Enter target IP or domain: ").strip()
@@ -1001,22 +1086,30 @@ def main():
             intensity = int(input("Scan intensity (1-3, default 1): ") or 1)
             
             scanner.enumerate_subdomains(domain, methods, intensity)
-        
+
         elif choice == '6':
-            url = input("Enter URL to scan for XSS (e.g., http://example.com/search.php): ").strip()
-            vulnerabilities = scanner.scan_for_xss(url)
-            scanner.display_xss_results(vulnerabilities)
-        
-        elif choice == '7':
             if not scanner.subdomains:
                 domain = input("Enter domain to enumerate first (e.g., example.com): ").strip()
                 scanner.enumerate_subdomains(domain)
-            
+
+            if scanner.subdomains:
+                scanner.check_live_subdomains(scanner.subdomains)
+
+        elif choice == '7':
+            url = input("Enter URL to scan for XSS (e.g., http://example.com/search.php): ").strip()
+            vulnerabilities = scanner.scan_for_xss(url)
+            scanner.display_xss_results(vulnerabilities)
+
+        elif choice == '8':
+            if not scanner.subdomains:
+                domain = input("Enter domain to enumerate first (e.g., example.com): ").strip()
+                scanner.enumerate_subdomains(domain)
+
             if scanner.subdomains:
                 max_subdomains = int(input("Max subdomains to process (default 5): ") or 5)
                 scanner.advanced_xss_scan_subdomains(scanner.subdomains, max_subdomains)
-        
-        elif choice == '8':
+
+        elif choice == '9':
             domain = input("Enter domain for full reconnaissance: ").strip()
             
             # Step 1: Subdomain enumeration
@@ -1042,7 +1135,7 @@ def main():
                         print(f"\nPort scanning: {subdomain}")
                         scanner.comprehensive_scan(subdomain)
         
-        elif choice == '9':
+        elif choice == '10':
             print("Goodbye!")
             break
         
