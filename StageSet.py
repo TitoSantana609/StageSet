@@ -21,6 +21,7 @@ import re
 from bs4 import BeautifulSoup
 import tempfile
 import glob
+import shutil
 
 class SantanaScanner:
     def __init__(self):
@@ -903,6 +904,41 @@ class SantanaScanner:
         self.subdomains = set(sorted_subdomains)
         return self.subdomains
 
+    def install_dnsx(self):
+        """Attempt to install dnsx via apt, falling back to go install"""
+        if sys.platform.lower().startswith("linux"):
+            print("  [+] Installing dnsx via apt (may prompt for your sudo password)...")
+            try:
+                result = subprocess.run(["sudo", "apt", "install", "-y", "dnsx"], timeout=180)
+                if result.returncode == 0 and self.check_tool_installed("dnsx"):
+                    print("  [+] dnsx installed successfully")
+                    return True
+            except subprocess.TimeoutExpired:
+                print("  [-] apt install timed out")
+            except Exception as e:
+                print(f"  [-] apt install failed: {e}")
+
+        if shutil.which("go"):
+            print("  [+] Installing dnsx via go install...")
+            try:
+                result = subprocess.run(
+                    ["go", "install", "-v", "github.com/projectdiscovery/dnsx/cmd/dnsx@latest"],
+                    timeout=300
+                )
+                if result.returncode == 0 and self.check_tool_installed("dnsx"):
+                    print("  [+] dnsx installed successfully")
+                    return True
+            except subprocess.TimeoutExpired:
+                print("  [-] go install timed out")
+            except Exception as e:
+                print(f"  [-] go install failed: {e}")
+        else:
+            print("  [-] go is not installed, cannot install dnsx via go install")
+
+        print("  [-] Automatic installation failed. Install dnsx manually:")
+        print("      https://github.com/projectdiscovery/dnsx")
+        return False
+
     def run_dnsx(self, subdomains, timeout=300):
         """Run dnsx to resolve subdomains and determine which are live"""
         live_subdomains = set()
@@ -1088,12 +1124,21 @@ def main():
             scanner.enumerate_subdomains(domain, methods, intensity)
 
         elif choice == '6':
-            if not scanner.subdomains:
-                domain = input("Enter domain to enumerate first (e.g., example.com): ").strip()
-                scanner.enumerate_subdomains(domain)
+            if not scanner.check_tool_installed("dnsx"):
+                print("dnsx is not installed.")
+                install_choice = input("Install dnsx now? (y/n): ").strip().lower()
+                if install_choice == 'y':
+                    scanner.install_dnsx()
+                else:
+                    print("Skipping. Install dnsx manually to use this feature.")
 
-            if scanner.subdomains:
-                scanner.check_live_subdomains(scanner.subdomains)
+            if scanner.check_tool_installed("dnsx"):
+                if not scanner.subdomains:
+                    domain = input("Enter domain to enumerate first (e.g., example.com): ").strip()
+                    scanner.enumerate_subdomains(domain)
+
+                if scanner.subdomains:
+                    scanner.check_live_subdomains(scanner.subdomains)
 
         elif choice == '7':
             url = input("Enter URL to scan for XSS (e.g., http://example.com/search.php): ").strip()
