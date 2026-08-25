@@ -262,38 +262,53 @@ class SantanaScanner:
     # Advanced XSS Detection with GAU and gf Integration
 
     def run_with_spinner(self, command, label, timeout=None):
-        """Run a subprocess while showing a spinner so long-running tools don't look frozen"""
-        result_holder = {}
+        """Run a subprocess while showing a spinner so long-running tools don't look frozen.
 
-        def target():
-            try:
-                result_holder['proc'] = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
-            except subprocess.TimeoutExpired as e:
-                result_holder['error'] = e
-            except Exception as e:
-                result_holder['error'] = e
-
-        worker = threading.Thread(target=target)
-        worker.start()
+        stdin is always closed off from the real terminal (subprocess.DEVNULL). Some of
+        these tools (dirb's 'n'/'q'/'r' hotkeys, ffuf's live keypress listener) put the
+        terminal into raw/no-echo mode to read single keypresses. If such a process is
+        killed abruptly (our own timeout, or Ctrl+C) it never gets to restore that state,
+        which leaves the real terminal broken (no backspace, garbled input) after exit.
+        Keeping the real stdin out of the child's hands avoids that entirely, and killing
+        the child ourselves on timeout/interrupt (rather than leaving it orphaned) avoids
+        the rest.
+        """
+        proc = subprocess.Popen(
+            command, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        )
 
         spinner_frames = "|/-\\"
         frame = 0
         start_time = time.time()
-        while worker.is_alive():
-            elapsed = time.time() - start_time
-            line = f"    {spinner_frames[frame % len(spinner_frames)]} {label}... ({elapsed:.0f}s)"
-            sys.stdout.write("\r" + line.ljust(80))
+
+        try:
+            while True:
+                if proc.poll() is not None:
+                    break
+
+                elapsed = time.time() - start_time
+                if timeout and elapsed > timeout:
+                    proc.kill()
+                    proc.wait()
+                    raise subprocess.TimeoutExpired(command, timeout)
+
+                line = f"    {spinner_frames[frame % len(spinner_frames)]} {label}... ({elapsed:.0f}s)"
+                sys.stdout.write("\r" + line.ljust(80))
+                sys.stdout.flush()
+                frame += 1
+                time.sleep(0.2)
+        except BaseException:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+            raise
+        finally:
+            sys.stdout.write("\r" + " " * 80 + "\r")
             sys.stdout.flush()
-            frame += 1
-            time.sleep(0.2)
-        worker.join()
 
-        sys.stdout.write("\r" + " " * 80 + "\r")
-        sys.stdout.flush()
-
-        if 'error' in result_holder:
-            raise result_holder['error']
-        return result_holder['proc']
+        stdout, stderr = proc.communicate()
+        return subprocess.CompletedProcess(command, proc.returncode, stdout, stderr)
 
     def check_tool_installed(self, tool_name):
         """Check if a security tool is installed"""
@@ -1311,9 +1326,19 @@ class SantanaScanner:
             print(f"  [-] Missing required tools: {', '.join(missing)}")
             return {}
 
+        word_count = self.count_file_lines(wordlist_path)
+
         print(f"\nStarting directory brute force for: {target_url}")
-        print(f"Wordlist: {wordlist_path}")
+        print(f"Wordlist: {wordlist_path} ({word_count} words)")
         print("=" * 60)
+
+        if word_count > 5000:
+            print(f"  [!] dirb has no concurrency and no per-request timeout — it sends {word_count} "
+                  "requests one at a time.")
+            print("      Against a slow or rate-limited target (WAFs/CDNs often throttle or drop "
+                  "requests after a burst of 404s), this can take a very long time and may look frozen.")
+            print("      ffuf runs concurrently and will typically finish first; dirb is the bottleneck. "
+                  "For live/production targets, consider a smaller wordlist (e.g. common.txt).")
 
         start_time = time.time()
 
@@ -1558,6 +1583,9 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         print("\nScan interrupted by user. Exiting...")
+        # Defense in depth: if an interrupted tool (e.g. dirb's hotkey listener) left the
+        # terminal's raw/echo settings in a bad state, this restores sane defaults.
+        subprocess.run(["stty", "sane"], stderr=subprocess.DEVNULL)
         sys.exit(0)
     except Exception as e:
         print(f"Unexpected error: {e}")
