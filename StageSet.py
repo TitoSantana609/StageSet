@@ -22,6 +22,7 @@ from bs4 import BeautifulSoup
 import tempfile
 import glob
 import shutil
+import urllib3
 
 DEFAULT_DIR_WORDLIST = "/usr/share/seclists/Discovery/Web-Content/raft-medium-directories.txt"
 
@@ -33,7 +34,38 @@ class SantanaScanner:
         self.live_subdomains = set()
         self.xss_findings = []
         self.directory_results = {}
+        self.burp_proxy = None
         self.lock = threading.Lock()
+
+    def set_burp_proxy(self, proxy_url):
+        """Enable or disable routing traffic through Burp Suite (or any HTTP/SOCKS proxy)"""
+        self.burp_proxy = proxy_url
+        if proxy_url:
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            print(f"  [+] Proxy enabled: {proxy_url}")
+            print("      Requests-based traffic (crt.sh/crt.name queries, XSS testing) will route through it.")
+            print("      dirb, ffuf, and subfinder will also be pointed at it via their native proxy flags.")
+            print("      gau, amass, and dnsx have no relevant native proxy flag and will bypass it.")
+            print("      Make sure Burp's proxy listener is running.")
+        else:
+            print("  [+] Proxy disabled")
+
+    def get_requests_proxies(self):
+        """Return a requests-compatible proxies dict if a proxy is configured, else None"""
+        if not self.burp_proxy:
+            return None
+        return {'http': self.burp_proxy, 'https': self.burp_proxy}
+
+    def proxy_cli_args(self, tool_name):
+        """Return CLI args to route a subprocess tool's traffic through the configured proxy, if supported"""
+        if not self.burp_proxy:
+            return []
+        proxy_flag_map = {
+            'ffuf': ['-x', self.burp_proxy],
+            'dirb': ['-p', self.burp_proxy],
+            'subfinder': ['-proxy', self.burp_proxy]
+        }
+        return proxy_flag_map.get(tool_name, [])
         
     def validate_ip(self, target):
         """Validate IP address format"""
@@ -263,8 +295,10 @@ class SantanaScanner:
     def run_gau_for_subdomain(self, subdomain, output_file):
         """Run GAU to get all URLs for a subdomain"""
         print(f"    [+] Running GAU for {subdomain}")
+        if self.burp_proxy:
+            print("    [!] gau has no native proxy flag; this traffic will NOT go through the configured proxy")
         start_time = time.time()
-        
+
         try:
             command = ["gau", subdomain, "--o", output_file]
             result = subprocess.run(command, capture_output=True, text=True, timeout=300)
@@ -622,10 +656,11 @@ class SantanaScanner:
                         base_url = urllib.parse.urlparse(vector['url'])
                         target_url = f"{base_url.scheme}://{base_url.netloc}{vector['action']}"
                 
+                proxies = self.get_requests_proxies()
                 if vector['method'] == 'post':
-                    response = requests.post(target_url, data=data, timeout=10, verify=False)
+                    response = requests.post(target_url, data=data, timeout=10, verify=False, proxies=proxies)
                 else:
-                    response = requests.get(target_url, params=data, timeout=10, verify=False)
+                    response = requests.get(target_url, params=data, timeout=10, verify=False, proxies=proxies)
                 
                 return response
                 
@@ -637,7 +672,7 @@ class SantanaScanner:
                 new_query = urllib.parse.urlencode(query_params, doseq=True)
                 new_url = f"{parsed_url.scheme}://{parsed_url.netloc}{parsed_url.path}?{new_query}"
                 
-                response = requests.get(new_url, timeout=10, verify=False)
+                response = requests.get(new_url, timeout=10, verify=False, proxies=self.get_requests_proxies())
                 return response
                 
         except Exception as e:
@@ -676,7 +711,7 @@ class SantanaScanner:
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             })
             
-            response = session.get(url, timeout=timeout, verify=False)
+            response = session.get(url, timeout=timeout, verify=False, proxies=self.get_requests_proxies())
             if response.status_code != 200:
                 return []
             
@@ -737,8 +772,9 @@ class SantanaScanner:
         try:
             url = f"https://crt.sh/?q=%25.{urllib.parse.quote(domain)}&output=json"
             headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-            
-            response = requests.get(url, headers=headers, timeout=30)
+
+            response = requests.get(url, headers=headers, timeout=30,
+                                     proxies=self.get_requests_proxies(), verify=not bool(self.burp_proxy))
             if response.status_code == 200:
                 data = response.json()
                 for entry in data:
@@ -768,7 +804,8 @@ class SantanaScanner:
             url = f"https://crt.name/v1/search?apex={urllib.parse.quote(domain)}"
             headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
 
-            response = requests.get(url, headers=headers, timeout=30)
+            response = requests.get(url, headers=headers, timeout=30,
+                                     proxies=self.get_requests_proxies(), verify=not bool(self.burp_proxy))
             if response.status_code == 200:
                 for line in response.text.splitlines():
                     subdomain = line.strip().lower()
@@ -790,7 +827,10 @@ class SantanaScanner:
         if not self.check_tool_installed("amass"):
             print("  [-] Amass not installed. Skipping...")
             return subdomains
-        
+
+        if self.burp_proxy:
+            print("  [!] amass has no native proxy flag; this traffic will NOT go through the configured proxy")
+
         try:
             command = ["amass", "enum", "-d", domain, "-passive", "-o", f"amass_{domain}.txt"]
             
@@ -834,7 +874,7 @@ class SantanaScanner:
             return subdomains
         
         try:
-            command = ["subfinder", "-d", domain, "-o", f"subfinder_{domain}.txt"]
+            command = ["subfinder", "-d", domain, "-o", f"subfinder_{domain}.txt"] + self.proxy_cli_args("subfinder")
             result = subprocess.run(command, capture_output=True, text=True, timeout=300)
             
             if result.returncode == 0:
@@ -1070,7 +1110,7 @@ class SantanaScanner:
         results = {}
 
         try:
-            command = ["dirb", target_url, wordlist, "-o", output_file, "-S", "-r"]
+            command = ["dirb", target_url, wordlist, "-o", output_file, "-S", "-r"] + self.proxy_cli_args("dirb")
             subprocess.run(command, capture_output=True, text=True, timeout=1800)
 
             line_pattern = re.compile(r'^\+\s+(\S+)\s+\(CODE:(\d+)\|SIZE:(\d+)\)')
@@ -1109,7 +1149,7 @@ class SantanaScanner:
             command = [
                 "ffuf", "-u", fuzz_url, "-w", wordlist,
                 "-mc", "all", "-o", output_file, "-of", "json", "-s"
-            ]
+            ] + self.proxy_cli_args("ffuf")
             subprocess.run(command, capture_output=True, text=True, timeout=1800)
 
             if os.path.isfile(output_file):
@@ -1291,9 +1331,11 @@ def main():
         print("8. Advanced XSS Scan (Subdomains + GAU + gf + URO)")
         print("9. Full Reconnaissance (Complete Workflow)")
         print("10. Directory Brute Force (dirb + ffuf)")
-        print("11. Exit")
+        proxy_status = scanner.burp_proxy or "disabled"
+        print(f"11. Configure Proxy / Burp Suite (currently: {proxy_status})")
+        print("12. Exit")
 
-        choice = input("\nSelect option (1-11): ").strip()
+        choice = input("\nSelect option (1-12): ").strip()
         
         if choice == '1':
             target = input("Enter target IP or domain: ").strip()
@@ -1452,9 +1494,25 @@ def main():
                 print(f"Invalid filter input: {e}")
 
         elif choice == '11':
+            current = scanner.burp_proxy or "disabled"
+            print(f"\nCurrent proxy: {current}")
+            print("1. Enable/set proxy (Burp default: http://127.0.0.1:8080)")
+            print("2. Disable proxy")
+
+            sub_choice = input("Select (1-2): ").strip()
+            if sub_choice == '1':
+                proxy_url = input("Enter proxy URL (blank for http://127.0.0.1:8080): ").strip() \
+                    or "http://127.0.0.1:8080"
+                scanner.set_burp_proxy(proxy_url)
+            elif sub_choice == '2':
+                scanner.set_burp_proxy(None)
+            else:
+                print("Invalid option.")
+
+        elif choice == '12':
             print("Goodbye!")
             break
-        
+
         else:
             print("Invalid option. Please try again.")
 
