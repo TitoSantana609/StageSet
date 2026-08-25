@@ -260,7 +260,41 @@ class SantanaScanner:
         print(f"Found {len(self.open_ports)} open ports")
 
     # Advanced XSS Detection with GAU and gf Integration
-    
+
+    def run_with_spinner(self, command, label, timeout=None):
+        """Run a subprocess while showing a spinner so long-running tools don't look frozen"""
+        result_holder = {}
+
+        def target():
+            try:
+                result_holder['proc'] = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+            except subprocess.TimeoutExpired as e:
+                result_holder['error'] = e
+            except Exception as e:
+                result_holder['error'] = e
+
+        worker = threading.Thread(target=target)
+        worker.start()
+
+        spinner_frames = "|/-\\"
+        frame = 0
+        start_time = time.time()
+        while worker.is_alive():
+            elapsed = time.time() - start_time
+            line = f"    {spinner_frames[frame % len(spinner_frames)]} {label}... ({elapsed:.0f}s)"
+            sys.stdout.write("\r" + line.ljust(80))
+            sys.stdout.flush()
+            frame += 1
+            time.sleep(0.2)
+        worker.join()
+
+        sys.stdout.write("\r" + " " * 80 + "\r")
+        sys.stdout.flush()
+
+        if 'error' in result_holder:
+            raise result_holder['error']
+        return result_holder['proc']
+
     def check_tool_installed(self, tool_name):
         """Check if a security tool is installed"""
         try:
@@ -294,15 +328,14 @@ class SantanaScanner:
 
     def run_gau_for_subdomain(self, subdomain, output_file):
         """Run GAU to get all URLs for a subdomain"""
-        print(f"    [+] Running GAU for {subdomain}")
         if self.burp_proxy:
             print("    [!] gau has no native proxy flag; this traffic will NOT go through the configured proxy")
         start_time = time.time()
 
         try:
             command = ["gau", subdomain, "--o", output_file]
-            result = subprocess.run(command, capture_output=True, text=True, timeout=300)
-            
+            result = self.run_with_spinner(command, f"Running GAU for {subdomain}", timeout=300)
+
             end_time = time.time()
             
             if result.returncode == 0:
@@ -326,13 +359,12 @@ class SantanaScanner:
 
     def run_gf_xss_filter(self, input_file, output_file):
         """Run gf XSS filter on URLs"""
-        print(f"    [+] Running gf XSS filter")
         start_time = time.time()
-        
+
         try:
             command = ["gf", "xss", input_file]
-            result = subprocess.run(command, capture_output=True, text=True, timeout=60)
-            
+            result = self.run_with_spinner(command, "Running gf XSS filter", timeout=60)
+
             end_time = time.time()
             
             if result.returncode == 0 and result.stdout.strip():
@@ -354,13 +386,12 @@ class SantanaScanner:
 
     def run_uro_filter(self, input_file, output_file):
         """Run URO to filter and normalize URLs"""
-        print(f"    [+] Running URO filter")
         start_time = time.time()
-        
+
         try:
             command = ["uro", "-i", input_file]
-            result = subprocess.run(command, capture_output=True, text=True, timeout=60)
-            
+            result = self.run_with_spinner(command, "Running URO filter", timeout=60)
+
             end_time = time.time()
             
             if result.returncode == 0 and result.stdout.strip():
@@ -821,9 +852,8 @@ class SantanaScanner:
 
     def run_amass(self, domain, intensity=1):
         """Run Amass for subdomain enumeration"""
-        print(f"Running Amass on {domain}...")
         subdomains = set()
-        
+
         if not self.check_tool_installed("amass"):
             print("  [-] Amass not installed. Skipping...")
             return subdomains
@@ -833,13 +863,13 @@ class SantanaScanner:
 
         try:
             command = ["amass", "enum", "-d", domain, "-passive", "-o", f"amass_{domain}.txt"]
-            
+
             if intensity == 2:
                 command.extend(["-active"])
             elif intensity == 3:
                 command.extend(["-active", "-brute"])
-            
-            result = subprocess.run(command, capture_output=True, text=True, timeout=600)
+
+            result = self.run_with_spinner(command, f"Running Amass on {domain}", timeout=600)
             
             if result.returncode == 0:
                 try:
@@ -866,16 +896,15 @@ class SantanaScanner:
 
     def run_subfinder(self, domain):
         """Run Subfinder for subdomain enumeration"""
-        print(f"Running Subfinder on {domain}...")
         subdomains = set()
-        
+
         if not self.check_tool_installed("subfinder"):
             print("  [-] Subfinder not installed. Skipping...")
             return subdomains
-        
+
         try:
             command = ["subfinder", "-d", domain, "-o", f"subfinder_{domain}.txt"] + self.proxy_cli_args("subfinder")
-            result = subprocess.run(command, capture_output=True, text=True, timeout=300)
+            result = self.run_with_spinner(command, f"Running Subfinder on {domain}", timeout=300)
             
             if result.returncode == 0:
                 try:
@@ -1003,7 +1032,7 @@ class SantanaScanner:
                 tmp_path = tmp.name
 
             command = ["dnsx", "-l", tmp_path, "-silent"]
-            result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+            result = self.run_with_spinner(command, f"Running dnsx on {len(subdomains)} subdomains", timeout=timeout)
 
             for line in result.stdout.splitlines():
                 host = line.strip().lower()
@@ -1105,13 +1134,12 @@ class SantanaScanner:
 
     def run_dirb(self, target_url, wordlist, output_file):
         """Run dirb against a target URL and return discovered paths"""
-        print(f"    [+] Running dirb ({os.path.basename(wordlist)})")
         start_time = time.time()
         results = {}
 
         try:
             command = ["dirb", target_url, wordlist, "-o", output_file, "-S", "-r"] + self.proxy_cli_args("dirb")
-            subprocess.run(command, capture_output=True, text=True, timeout=1800)
+            self.run_with_spinner(command, f"Running dirb ({os.path.basename(wordlist)})", timeout=1800)
 
             line_pattern = re.compile(r'^\+\s+(\S+)\s+\(CODE:(\d+)\|SIZE:(\d+)\)')
             if os.path.isfile(output_file):
@@ -1139,7 +1167,6 @@ class SantanaScanner:
 
     def run_ffuf(self, target_url, wordlist, output_file):
         """Run ffuf against a target URL and return discovered paths"""
-        print(f"    [+] Running ffuf ({os.path.basename(wordlist)})")
         start_time = time.time()
         results = {}
 
@@ -1150,7 +1177,7 @@ class SantanaScanner:
                 "ffuf", "-u", fuzz_url, "-w", wordlist,
                 "-mc", "all", "-o", output_file, "-of", "json", "-s"
             ] + self.proxy_cli_args("ffuf")
-            subprocess.run(command, capture_output=True, text=True, timeout=1800)
+            self.run_with_spinner(command, f"Running ffuf ({os.path.basename(wordlist)})", timeout=1800)
 
             if os.path.isfile(output_file):
                 with open(output_file, 'r', errors='ignore') as f:
