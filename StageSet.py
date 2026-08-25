@@ -23,6 +23,8 @@ import tempfile
 import glob
 import shutil
 
+DEFAULT_DIR_WORDLIST = "/usr/share/seclists/Discovery/Web-Content/raft-medium-directories.txt"
+
 class SantanaScanner:
     def __init__(self):
         self.open_ports = []
@@ -30,6 +32,7 @@ class SantanaScanner:
         self.subdomains = set()
         self.live_subdomains = set()
         self.xss_findings = []
+        self.directory_results = {}
         self.lock = threading.Lock()
         
     def validate_ip(self, target):
@@ -246,6 +249,12 @@ class SantanaScanner:
                 return result.returncode == 0
             elif tool_name == "dnsx":
                 result = subprocess.run(["dnsx", "-version"], capture_output=True, text=True)
+                return result.returncode == 0
+            elif tool_name == "dirb":
+                result = subprocess.run(["dirb"], capture_output=True, text=True)
+                return "DIRB" in (result.stdout + result.stderr)
+            elif tool_name == "ffuf":
+                result = subprocess.run(["ffuf", "-V"], capture_output=True, text=True)
                 return result.returncode == 0
         except FileNotFoundError:
             return False
@@ -1043,6 +1052,226 @@ class SantanaScanner:
         end_time = time.time()
         self.display_results(target, start_time, end_time)
 
+    # Directory brute forcing with dirb and ffuf
+
+    def resolve_wordlist(self, wordlist=None):
+        """Resolve the wordlist path to use for directory brute forcing"""
+        path = wordlist or DEFAULT_DIR_WORDLIST
+        if not os.path.isfile(path):
+            print(f"  [-] Wordlist not found: {path}")
+            print("      Install SecLists with: sudo apt install seclists")
+            return None
+        return path
+
+    def run_dirb(self, target_url, wordlist, output_file):
+        """Run dirb against a target URL and return discovered paths"""
+        print(f"    [+] Running dirb ({os.path.basename(wordlist)})")
+        start_time = time.time()
+        results = {}
+
+        try:
+            command = ["dirb", target_url, wordlist, "-o", output_file, "-S", "-r"]
+            subprocess.run(command, capture_output=True, text=True, timeout=1800)
+
+            line_pattern = re.compile(r'^\+\s+(\S+)\s+\(CODE:(\d+)\|SIZE:(\d+)\)')
+            if os.path.isfile(output_file):
+                with open(output_file, 'r', errors='ignore') as f:
+                    for line in f:
+                        match = line_pattern.match(line.strip())
+                        if match:
+                            url, code, size = match.groups()
+                            path = urllib.parse.urlparse(url).path or "/"
+                            results[path] = {
+                                'url': url,
+                                'status_code': int(code),
+                                'content_length': int(size)
+                            }
+
+            end_time = time.time()
+            print(f"    [+] dirb found {len(results)} paths in {end_time - start_time:.2f}s")
+
+        except subprocess.TimeoutExpired:
+            print("    [-] dirb timed out")
+        except Exception as e:
+            print(f"    [-] Error running dirb: {e}")
+
+        return results
+
+    def run_ffuf(self, target_url, wordlist, output_file):
+        """Run ffuf against a target URL and return discovered paths"""
+        print(f"    [+] Running ffuf ({os.path.basename(wordlist)})")
+        start_time = time.time()
+        results = {}
+
+        fuzz_url = target_url.rstrip('/') + '/FUZZ'
+
+        try:
+            command = [
+                "ffuf", "-u", fuzz_url, "-w", wordlist,
+                "-mc", "all", "-o", output_file, "-of", "json", "-s"
+            ]
+            subprocess.run(command, capture_output=True, text=True, timeout=1800)
+
+            if os.path.isfile(output_file):
+                with open(output_file, 'r', errors='ignore') as f:
+                    data = json.load(f)
+
+                for entry in data.get('results', []):
+                    url = entry.get('url', '')
+                    path = urllib.parse.urlparse(url).path or "/"
+                    results[path] = {
+                        'url': url,
+                        'status_code': entry.get('status'),
+                        'content_length': entry.get('length')
+                    }
+
+            end_time = time.time()
+            print(f"    [+] ffuf found {len(results)} paths in {end_time - start_time:.2f}s")
+
+        except subprocess.TimeoutExpired:
+            print("    [-] ffuf timed out")
+        except Exception as e:
+            print(f"    [-] Error running ffuf: {e}")
+
+        return results
+
+    def combine_directory_results(self, dirb_results, ffuf_results):
+        """Combine and dedupe directories found by dirb and ffuf"""
+        combined = {}
+
+        for path, info in dirb_results.items():
+            combined[path] = dict(info)
+            combined[path]['sources'] = {'dirb'}
+
+        for path, info in ffuf_results.items():
+            if path in combined:
+                combined[path]['sources'].add('ffuf')
+            else:
+                combined[path] = dict(info)
+                combined[path]['sources'] = {'ffuf'}
+
+        return combined
+
+    def filter_directory_results(self, results, include_codes=None, exclude_codes=None,
+                                  min_length=None, max_length=None, exclude_lengths=None):
+        """Filter combined directory results by status code and content length"""
+        filtered = {}
+
+        for path, info in results.items():
+            code = info.get('status_code')
+            length = info.get('content_length')
+
+            if include_codes and code not in include_codes:
+                continue
+            if exclude_codes and code in exclude_codes:
+                continue
+            if min_length is not None and (length is None or length < min_length):
+                continue
+            if max_length is not None and (length is None or length > max_length):
+                continue
+            if exclude_lengths and length in exclude_lengths:
+                continue
+
+            filtered[path] = info
+
+        return filtered
+
+    def display_directory_results(self, results, target_url):
+        """Display combined directory brute force results"""
+        print("\n" + "=" * 80)
+        print(f"DIRECTORY BRUTE FORCE RESULTS FOR: {target_url}")
+        print("=" * 80)
+
+        if not results:
+            print("No directories found matching the current filters.")
+            return
+
+        print(f"{'PATH':<40} {'CODE':<6} {'LENGTH':<10} {'SOURCE'}")
+        print("-" * 80)
+
+        for path in sorted(results.keys()):
+            info = results[path]
+            code = info.get('status_code')
+            length = info.get('content_length')
+            sources = ",".join(sorted(info.get('sources', [])))
+            print(f"{path:<40} {str(code):<6} {str(length):<10} {sources}")
+
+        print("-" * 80)
+        print(f"Total directories found: {len(results)}")
+
+    def save_directory_results(self, results, target_url):
+        """Save combined directory brute force results to a file"""
+        safe_target = re.sub(r'[^a-zA-Z0-9]', '_', target_url)
+        filename = f"dirbrute_{safe_target}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+
+        try:
+            summary = {
+                'target': target_url,
+                'scan_timestamp': datetime.now().isoformat(),
+                'total_found': len(results),
+                'results': [
+                    {
+                        'path': path,
+                        'url': info.get('url'),
+                        'status_code': info.get('status_code'),
+                        'content_length': info.get('content_length'),
+                        'sources': sorted(info.get('sources', []))
+                    }
+                    for path, info in sorted(results.items())
+                ]
+            }
+
+            with open(filename, 'w') as f:
+                json.dump(summary, f, indent=2)
+
+            print(f"Results saved to: {filename}")
+        except Exception as e:
+            print(f"Error saving results: {e}")
+
+    def directory_bruteforce(self, target_url, wordlist=None, include_codes=None,
+                              exclude_codes=None, min_length=None, max_length=None,
+                              exclude_lengths=None):
+        """Brute force directories using dirb and ffuf, combine and filter results"""
+        if not target_url.startswith('http'):
+            target_url = 'http://' + target_url
+
+        wordlist_path = self.resolve_wordlist(wordlist)
+        if not wordlist_path:
+            return {}
+
+        missing = [t for t in ('dirb', 'ffuf') if not self.check_tool_installed(t)]
+        if missing:
+            print(f"  [-] Missing required tools: {', '.join(missing)}")
+            return {}
+
+        print(f"\nStarting directory brute force for: {target_url}")
+        print(f"Wordlist: {wordlist_path}")
+        print("=" * 60)
+
+        start_time = time.time()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dirb_output = os.path.join(tmp_dir, "dirb_output.txt")
+            ffuf_output = os.path.join(tmp_dir, "ffuf_output.json")
+
+            dirb_results = self.run_dirb(target_url, wordlist_path, dirb_output)
+            ffuf_results = self.run_ffuf(target_url, wordlist_path, ffuf_output)
+
+        combined = self.combine_directory_results(dirb_results, ffuf_results)
+        filtered = self.filter_directory_results(
+            combined, include_codes, exclude_codes, min_length, max_length, exclude_lengths
+        )
+
+        end_time = time.time()
+        print(f"\nCombined {len(combined)} unique paths from dirb + ffuf "
+              f"({len(filtered)} after filters) in {end_time - start_time:.2f}s")
+
+        self.display_directory_results(filtered, target_url)
+        self.save_directory_results(filtered, target_url)
+
+        self.directory_results = filtered
+        return filtered
+
 def main():
     """Main function with user interface"""
     scanner = SantanaScanner()
@@ -1061,9 +1290,10 @@ def main():
         print("7. XSS Scan (Single URL)")
         print("8. Advanced XSS Scan (Subdomains + GAU + gf + URO)")
         print("9. Full Reconnaissance (Complete Workflow)")
-        print("10. Exit")
+        print("10. Directory Brute Force (dirb + ffuf)")
+        print("11. Exit")
 
-        choice = input("\nSelect option (1-10): ").strip()
+        choice = input("\nSelect option (1-11): ").strip()
         
         if choice == '1':
             target = input("Enter target IP or domain: ").strip()
@@ -1181,6 +1411,47 @@ def main():
                         scanner.comprehensive_scan(subdomain)
         
         elif choice == '10':
+            target = input("Enter target URL (e.g., http://example.com): ").strip()
+
+            print("\nWordlist options:")
+            print(f"1. raft-medium-directories.txt (default, ~30K words, balanced)")
+            print("2. common.txt (~4.7K words, fast)")
+            print("3. raft-large-directories.txt (~62K words, thorough/slow)")
+            print("4. Custom path")
+
+            wordlist_choice = input("Select wordlist (1-4, default 1): ").strip() or "1"
+            wordlist_map = {
+                "1": DEFAULT_DIR_WORDLIST,
+                "2": "/usr/share/seclists/Discovery/Web-Content/common.txt",
+                "3": "/usr/share/seclists/Discovery/Web-Content/raft-large-directories.txt"
+            }
+            if wordlist_choice == "4":
+                wordlist = input("Enter full path to wordlist: ").strip()
+            else:
+                wordlist = wordlist_map.get(wordlist_choice, DEFAULT_DIR_WORDLIST)
+
+            print("\nOptional filters (leave blank to skip):")
+            include_input = input("Include only these status codes (comma-separated, e.g. 200,301,403): ").strip()
+            exclude_input = input("Exclude these status codes (comma-separated): ").strip()
+            min_length_input = input("Minimum content length: ").strip()
+            max_length_input = input("Maximum content length: ").strip()
+            exclude_lengths_input = input("Exclude these exact content lengths (comma-separated, e.g. soft-404 size): ").strip()
+
+            try:
+                include_codes = {int(c) for c in include_input.split(",") if c.strip()} or None
+                exclude_codes = {int(c) for c in exclude_input.split(",") if c.strip()} or None
+                min_length = int(min_length_input) if min_length_input else None
+                max_length = int(max_length_input) if max_length_input else None
+                exclude_lengths = {int(l) for l in exclude_lengths_input.split(",") if l.strip()} or None
+
+                scanner.directory_bruteforce(
+                    target, wordlist, include_codes, exclude_codes,
+                    min_length, max_length, exclude_lengths
+                )
+            except ValueError as e:
+                print(f"Invalid filter input: {e}")
+
+        elif choice == '11':
             print("Goodbye!")
             break
         
