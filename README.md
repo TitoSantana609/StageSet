@@ -1,7 +1,9 @@
 # StageSet.py
-This Python based tool will perform the following features: Nmap Scan, Ping Sweep, Subdomain Enumeration, and Full Recon (subdomain and port scans) This sets the stage for the show
+This Python based tool will perform the following features: Nmap Scan, Ping Sweep, Subdomain Enumeration, Directory Brute Forcing, and Full Recon (subdomain and port scans) This sets the stage for the show
 
 Subdomain enumeration pulls from crt.sh, crt.name, Amass, and Subfinder. Live/dead status for discovered subdomains is checked with dnsx.
+
+Directory brute forcing runs dirb and ffuf against the same target using a shared SecLists wordlist (raft-medium-directories.txt by default), combines and dedupes the paths both tools find, and lets you filter the combined results by status code and content length (handy for filtering out soft-404 pages).
 
 Installation Requirements:
 
@@ -9,7 +11,7 @@ Installation Requirements:
 
 # Install required tools (Kali Linux)
 sudo apt update <br>
-sudo apt install amass subfinder dnsx <br>
+sudo apt install amass subfinder dnsx dirb ffuf seclists <br>
 # Install required tools
 go install github.com/lc/gau/v2/cmd/gau@latest <br>
 go install github.com/tomnomnom/gf@latest <br>
@@ -36,15 +38,20 @@ Usage Examples:
 
 
 # Basic subdomain enumeration
-python3 SantanaScanner.py
+python3 StageSet.py
 # Choose option 5, enter domain
 
 # Full reconnaissance workflow
-python3 SantanaScanner.py
-# Choose option 7 for complete automation
+python3 StageSet.py
+# Choose option 9 for complete automation
+
+# Directory brute forcing (dirb + ffuf, combined results)
+python3 StageSet.py
+# Choose option 10, enter target URL, pick a wordlist, optionally filter
+# by status code and/or content length
 
 # Command line usage for specific domains
-echo "example.com" | python3 SantanaScanner.py
+echo "example.com" | python3 StageSet.py
 
 <br>
 Coming Soon: Option to specify a specific endpoint to run the XSS scanner on.
